@@ -4,11 +4,11 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import path from "path";
+import fs from "fs";
 
 import { fileURLToPath } from "url";
 
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { TextLoader } from "@langchain/community/document_loaders/fs/text.js";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
@@ -70,18 +70,19 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
     const ext = path.extname(req.file.originalname).toLowerCase();
 
     let loader;
+    let docs;
 
     if (ext === ".pdf") {
       loader = new PDFLoader(filePath);
+      docs = await loader.load();
     } else if (ext === ".txt") {
-      loader = new TextLoader(filePath);
+      const text = fs.readFileSync(filePath, "utf-8");
+      docs = [{ pageContent: text, metadata: { source: filePath } }];
     } else {
       return res.status(400).json({
         error: "Unsupported file type",
       });
     }
-
-    const docs = await loader.load();
 
     // ─────────────────────────────────────────────
     // Chunking Strategy: RecursiveCharacterTextSplitter
@@ -131,7 +132,9 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────
 // Chat API
+// ─────────────────────────────────────────────
 
 app.post("/api/chat", async (req, res) => {
   try {
