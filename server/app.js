@@ -8,7 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
+import { TextLoader } from "@langchain/community/document_loaders/fs/text";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
@@ -73,8 +73,8 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
 
     if (ext === ".pdf") {
       loader = new PDFLoader(filePath);
-    } else if (ext === ".csv") {
-      loader = new CSVLoader(filePath);
+    } else if (ext === ".txt") {
+      loader = new TextLoader(filePath);
     } else {
       return res.status(400).json({
         error: "Unsupported file type",
@@ -131,9 +131,7 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────
 // Chat API
-// ─────────────────────────────────────────────
 
 app.post("/api/chat", async (req, res) => {
   try {

@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
+import { TextLoader } from "@langchain/community/document_loaders/fs/text";
 import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/huggingface_transformers";
 import { QdrantVectorStore } from "@langchain/qdrant";
 import { QdrantClient } from "@qdrant/js-client-rest";
@@ -34,7 +34,7 @@ async function indexing(filePath) {
     const ext = path.extname(filePath).toLowerCase();
 
     const loader =
-      ext === ".csv" ? new CSVLoader(filePath) : new PDFLoader(filePath);
+      ext === ".txt" ? new TextLoader(filePath) : new PDFLoader(filePath);
 
     const docs = await loader.load();
 
@@ -131,7 +131,7 @@ ${searchedChunks.map((doc) => doc.pageContent).join("\n\n")}
 async function main() {
   console.log("\n📄 Welcome to NotebookLM CLI\n");
 
-  const filePath = await ask("Enter file path (PDF or CSV): ");
+  const filePath = await ask("Enter file path (PDF or TXT): ");
 
   console.log("\nIndexing your document...");
   await indexing(filePath.trim());
