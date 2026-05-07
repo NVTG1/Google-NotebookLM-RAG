@@ -105,7 +105,7 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
     } catch (e) {}
 
     // create vector db
-    await qdrantClient.recreateCollection(COLLECTION_NAME, {
+    await qdrantClient.createCollection(COLLECTION_NAME, {
       vectors: {
         size: 384,
         distance: "Cosine",
