@@ -45,7 +45,8 @@ const COLLECTION_NAME = "SEC-B";
 // ─────────────────────────────────────────────
 
 const qdrantClient = new QdrantClient({
-  url: "http://127.0.0.1:6333",
+  url: process.env.QDRANT_URL || "http://127.0.0.1:6333",
+  apiKey: process.env.QDRANT_API_KEY,
 });
 
 const embeddings = new HuggingFaceTransformersEmbeddings({
@@ -103,8 +104,9 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
     });
 
     await QdrantVectorStore.fromDocuments(splitDocs, embeddings, {
-      url: "http://127.0.0.1:6333",
+      url: process.env.QDRANT_URL || "http://127.0.0.1:6333",
       collectionName: COLLECTION_NAME,
+      apiKey: process.env.QDRANT_API_KEY,
     });
 
     res.json({
@@ -131,8 +133,9 @@ app.post("/api/chat", async (req, res) => {
     const vectorStore = await QdrantVectorStore.fromExistingCollection(
       embeddings,
       {
-        url: "http://127.0.0.1:6333",
+        url: process.env.QDRANT_URL || "http://127.0.0.1:6333",
         collectionName: COLLECTION_NAME,
+        apiKey: process.env.QDRANT_API_KEY,
       },
     );
 
