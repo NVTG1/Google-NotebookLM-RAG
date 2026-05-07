@@ -77,7 +77,10 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
       docs = await loader.load();
     } else if (ext === ".txt") {
       const text = fs.readFileSync(filePath, "utf-8");
-      docs = [{ pageContent: text, metadata: { source: filePath } }];
+      const { Document } = await import("@langchain/core/documents");
+      docs = [
+        new Document({ pageContent: text, metadata: { source: filePath } }),
+      ];
     } else {
       return res.status(400).json({
         error: "Unsupported file type",
