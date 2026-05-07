@@ -17,6 +17,7 @@
     "@huggingface/transformers": "^3.8.1",
     "@langchain/community": "^1.1.28",
     "@langchain/core": "^1.1.42",
+    "@langchain/google-genai": "^2.1.30",
     "@langchain/openai": "^1.4.5",
     "@langchain/qdrant": "^1.0.2",
     "@langchain/textsplitters": "^1.0.1",

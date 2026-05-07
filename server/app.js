@@ -12,6 +12,8 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+
 import { HuggingFaceInferenceAPIEmbeddings } from "@langchain/community";
 
 import { QdrantVectorStore } from "@langchain/qdrant";
@@ -49,9 +51,9 @@ const qdrantClient = new QdrantClient({
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-const embeddings = new HuggingFaceInferenceAPIEmbeddings({
-  apiKey: process.env.HF_API_KEY,
-  model: "sentence-transformers/all-MiniLM-L6-v2",
+const embeddings = new GoogleGenerativeAIEmbeddings({
+  apiKey: process.env.GOOGLE_API_KEY,
+  model: "text-embedding-004",
 });
 
 // ─────────────────────────────────────────────
@@ -107,7 +109,7 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
     // create vector db
     await qdrantClient.createCollection(COLLECTION_NAME, {
       vectors: {
-        size: 384,
+        size: 768,
         distance: "Cosine",
       },
     });
