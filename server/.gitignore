@@ -1,0 +1,8 @@
+node_modules/
+server/node_modules/
+.env
+uploads/
+*.log
+.DS_Store
+server/node_modules/@huggingface/transformers/.cache/
+server/node_modules/onnxruntime-node/
