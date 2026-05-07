@@ -83,6 +83,15 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
 
     const docs = await loader.load();
 
+    // ─────────────────────────────────────────────
+    // Chunking Strategy: RecursiveCharacterTextSplitter
+    // Splits documents recursively by paragraphs, sentences, then words.
+    // Chunk size: 500 characters — keeps chunks small enough for precise retrieval.
+    // Chunk overlap: 50 characters — preserves context across chunk boundaries.
+    // This ensures semantically related content stays together and no information
+    // is lost at the edges of chunks.
+    // ─────────────────────────────────────────────
+
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 500,
       chunkOverlap: 50,
