@@ -14,8 +14,6 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 
-import { HuggingFaceInferenceAPIEmbeddings } from "@langchain/community";
-
 import { QdrantVectorStore } from "@langchain/qdrant";
 
 import { QdrantClient } from "@qdrant/js-client-rest";
