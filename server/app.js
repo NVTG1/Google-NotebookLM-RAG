@@ -12,7 +12,7 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
-import { HuggingFaceInferenceAPIEmbeddings } from "@langchain/community/embeddings/hf_inference";
+import { HuggingFaceInferenceAPIEmbeddings } from "@langchain/community";
 
 import { QdrantVectorStore } from "@langchain/qdrant";
 
