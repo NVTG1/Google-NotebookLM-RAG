@@ -60,6 +60,20 @@ const embeddings = new HuggingFaceTransformersEmbeddings({
 app.use(express.static(path.join(__dirname, "client")));
 
 // ─────────────────────────────────────────────
+// Chunking Strategy: RecursiveCharacterTextSplitter
+// Splits documents recursively by paragraphs, sentences, then words.
+// Chunk size: 500 characters — keeps chunks small enough for precise retrieval.
+// Chunk overlap: 50 characters — preserves context across chunk boundaries.
+// This ensures semantically related content stays together and no information
+// is lost at the edges of chunks.
+// ─────────────────────────────────────────────
+
+const splitter = new RecursiveCharacterTextSplitter({
+  chunkSize: 500,
+  chunkOverlap: 50,
+});
+
+// ─────────────────────────────────────────────
 // Upload API
 // ─────────────────────────────────────────────
 
@@ -69,39 +83,20 @@ app.post("/api/upload", upload.single("document"), async (req, res) => {
 
     const ext = path.extname(req.file.originalname).toLowerCase();
 
-    let loader;
-    let docs;
+    let splitDocs;
 
     if (ext === ".pdf") {
-      loader = new PDFLoader(filePath);
-      docs = await loader.load();
+      const loader = new PDFLoader(filePath);
+      const docs = await loader.load();
+      splitDocs = await splitter.splitDocuments(docs);
     } else if (ext === ".txt") {
       const text = fs.readFileSync(filePath, "utf-8");
-      const { Document } = await import("@langchain/core/documents");
-      docs = [
-        new Document({ pageContent: text, metadata: { source: filePath } }),
-      ];
+      splitDocs = await splitter.createDocuments([text]);
     } else {
       return res.status(400).json({
         error: "Unsupported file type",
       });
     }
-
-    // ─────────────────────────────────────────────
-    // Chunking Strategy: RecursiveCharacterTextSplitter
-    // Splits documents recursively by paragraphs, sentences, then words.
-    // Chunk size: 500 characters — keeps chunks small enough for precise retrieval.
-    // Chunk overlap: 50 characters — preserves context across chunk boundaries.
-    // This ensures semantically related content stays together and no information
-    // is lost at the edges of chunks.
-    // ─────────────────────────────────────────────
-
-    const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 500,
-      chunkOverlap: 50,
-    });
-
-    const splitDocs = await splitter.splitDocuments(docs);
 
     // delete old collection
     try {
