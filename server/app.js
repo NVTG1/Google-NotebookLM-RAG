@@ -8,7 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { TextLoader } from "@langchain/community/document_loaders/fs/text";
+import { TextLoader } from "@langchain/community/document_loaders/fs/text.js";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
