@@ -1,32 +1,32 @@
 # Google NotebookLM RAG
 
-A RAG-powered document Q&A application. Upload any PDF or CSV and have a conversation with it. Built as Assignment 03.
+A RAG-powered document Q&A application. Upload any PDF or TXT file and have a conversation with it. Built as Assignment 03.
 
 ## Links
 
-- Live Demo: https://google-notebooklm-rag-6zxg.onrender.com
-- GitHub: https://github.com/NVTG1/Google-NotebookLM-RAG
+- **Live Demo:** https://google-notebooklm-rag-6zxg.onrender.com
+- **GitHub:** https://github.com/NVTG1/Google-NotebookLM-RAG
 
 ---
 
 ## What It Does
 
-Upload any document and ask natural language questions about it. The system retrieves the most relevant chunks from the document and generates grounded answers using an LLM. Answers come strictly from the document, not from the model's general knowledge.
+Upload any document and ask natural language questions about it. The system retrieves the most relevant chunks from the document and generates grounded answers using an LLM. Answers come strictly from the document — not from the model's general knowledge.
 
 ---
 
 ## RAG Pipeline
 
 ```
-Upload (PDF / CSV)
+Upload (PDF / TXT)
       |
-PDFLoader / CSVLoader  — document ingestion
+PDFLoader / fs.readFileSync  — document ingestion
       |
-RecursiveCharacterTextSplitter  — chunking (chunk size: 500, overlap: 50)
+Sliding Window Chunker  — chunking (chunk size: 1200 chars, overlap: 200 chars)
       |
-HuggingFace Xenova/all-MiniLM-L6-v2  — embedding
+TF-IDF Bag-of-Words  — local embedding (no external API, vocab built per document)
       |
-Qdrant Vector DB  — storage and similarity search (k=5)
+Qdrant Vector DB  — storage and cosine similarity search (k=5)
       |
 Groq llama-3.3-70b-versatile  — answer generation from retrieved context
 ```
@@ -35,24 +35,40 @@ Groq llama-3.3-70b-versatile  — answer generation from retrieved context
 
 ## Chunking Strategy
 
-Strategy used: RecursiveCharacterTextSplitter
+**Strategy:** Sliding Window with Sentence-Aware Overlap
 
-- Chunk size: 500 characters
-- Chunk overlap: 50 characters
+- Chunk size: 1200 characters
+- Chunk overlap: 200 characters
 
-This strategy splits documents recursively by paragraphs, then sentences, then words — preserving semantic coherence within each chunk. The overlap ensures that context is not lost at chunk boundaries, which improves retrieval quality for questions that span across sections.
+The document text is first split by sentence boundaries (`[.!?]`). Sentences are accumulated into chunks until the size limit is reached, at which point the last 200 characters are carried over into the next chunk as overlap. This ensures context is not lost at chunk boundaries — particularly important for information that spans multiple sentences or paragraphs.
+
+---
+
+## Embedding Approach
+
+**Strategy:** TF-IDF Bag-of-Words (no external embedding API)
+
+- Vocabulary is built fresh from each uploaded document (top 2000 most frequent tokens)
+- Stopwords are filtered out before tokenization
+- Each chunk is represented as a TF-IDF weighted vector
+- The same vocabulary is used to embed both chunks (at upload time) and queries (at chat time)
+- The Qdrant collection is recreated on each upload, sized to the actual vocabulary length
+
+This approach keeps the app fully self-contained — no OpenAI or HuggingFace embedding API calls required.
 
 ---
 
 ## Tech Stack
 
-- Frontend: HTML / CSS / Vanilla JS
-- Backend: Node.js + Express.js
-- Document Loaders: LangChain PDFLoader, CSVLoader
-- Chunking: LangChain RecursiveCharacterTextSplitter
-- Embeddings: HuggingFace Xenova/all-MiniLM-L6-v2
-- Vector Database: Qdrant Cloud
-- LLM: Groq llama-3.3-70b-versatile
+| Layer | Technology |
+|---|---|
+| Frontend | HTML / CSS / Vanilla JS |
+| Backend | Node.js + Express.js |
+| Document Loaders | LangChain `PDFLoader`, Node.js `fs` |
+| Chunking | Custom sliding window chunker |
+| Embeddings | TF-IDF (built from scratch, no external API) |
+| Vector Database | Qdrant (local via Docker or Qdrant Cloud) |
+| LLM | Groq `llama-3.3-70b-versatile` |
 
 ---
 
@@ -61,68 +77,70 @@ This strategy splits documents recursively by paragraphs, then sentences, then w
 ```
 Google-NotebookLM-RAG/
 ├── client/
-│   └── index.html          # Frontend UI — drag and drop upload, chat interface
+│   └── index.html          # Frontend UI — drag-and-drop upload, chat interface, sources panel
 └── server/
-    ├── app.js              # Express backend — upload API, chat API, RAG logic
+    ├── app.js              # Express backend — upload API, chat API, full RAG pipeline
     ├── index.js            # CLI version of the RAG pipeline
     ├── package.json
-    └── uploads/            # Temporary uploaded files
+    └── uploads/            # Temporary uploaded files (auto-cleaned after indexing)
 ```
 
 ---
 
 ## Running Locally
 
-Prerequisites: Node.js 18+, Docker, Groq API key from console.groq.com
+**Prerequisites:** Node.js 18+, Docker, Groq API key from [console.groq.com](https://console.groq.com)
 
-1. Clone the repo
+### 1. Clone the repo
 
 ```bash
 git clone https://github.com/NVTG1/Google-NotebookLM-RAG.git
 cd Google-NotebookLM-RAG/server
 ```
 
-2. Install dependencies
+### 2. Install dependencies
 
 ```bash
 npm install
 ```
 
-3. Create a .env file
+### 3. Create a `.env` file
 
-```
+```env
 GROQ_API_KEY=your_groq_api_key
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=notebooklm
 PORT=3000
 ```
 
-4. Start Qdrant with Docker
+### 4. Start Qdrant with Docker
 
 ```bash
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 ```
 
-5. Start the server
+### 5. Start the server
 
 ```bash
 node app.js
 ```
 
-6. Open in browser at http://localhost:3000
+### 6. Open in browser
+
+Navigate to [http://localhost:3000](http://localhost:3000)
 
 ---
 
 ## Deployment
 
-Deployed on Render with Qdrant Cloud as the vector database.
+Deployed on **Render** with **Qdrant Cloud** as the vector database.
 
-Environment variables set on Render:
+Environment variables to set on Render:
 
-```
-GROQ_API_KEY
-QDRANT_URL        — Qdrant Cloud cluster URL
-QDRANT_API_KEY    — Qdrant Cloud API key
-QDRANT_COLLECTION — notebooklm
-PORT              — 3000
+```env
+GROQ_API_KEY=your_groq_api_key
+QDRANT_URL=your_qdrant_cloud_cluster_url
+QDRANT_API_KEY=your_qdrant_cloud_api_key
+QDRANT_COLLECTION=notebooklm
+PORT=3000
 ```
