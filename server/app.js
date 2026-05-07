@@ -12,7 +12,7 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
-import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/huggingface_transformers";
+import { HuggingFaceInferenceAPIEmbeddings } from "@langchain/community/embeddings/hf";
 
 import { QdrantVectorStore } from "@langchain/qdrant";
 
@@ -49,8 +49,9 @@ const qdrantClient = new QdrantClient({
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-const embeddings = new HuggingFaceTransformersEmbeddings({
-  model: "Xenova/all-MiniLM-L6-v2",
+const embeddings = new HuggingFaceInferenceAPIEmbeddings({
+  apiKey: process.env.HF_API_KEY,
+  model: "sentence-transformers/all-MiniLM-L6-v2",
 });
 
 // ─────────────────────────────────────────────
