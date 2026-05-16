@@ -284,7 +284,7 @@
         <input type="file" id="fileInput" accept=".pdf,.txt" />
         <span class="drop-icon">📄</span>
         <div class="drop-text"><strong>Upload a document</strong>Drop a file or click to browse</div>
-        <div class="drop-types">PDF · TXT</div>
+        <div class="drop-types">PDF · TXT &nbsp;·&nbsp; up to 200 MB</div>
       </div>
       <div class="upload-status" id="uploadStatus">
         <div class="progress-label" id="progressLabel">Processing document…</div>
@@ -365,34 +365,69 @@
 
     dropZone.style.display = 'none';
     document.getElementById('uploadStatus').classList.add('visible');
-    document.getElementById('progressLabel').textContent = 'Chunking & indexing…';
+    document.getElementById('progressLabel').textContent = 'Uploading…';
 
-    let pct = 0;
     const bar = document.getElementById('progressBar');
-    const tick = setInterval(() => { pct = Math.min(pct + Math.random() * 7, 85); bar.style.width = pct + '%'; }, 300);
+    bar.style.width = '5%';
 
     const formData = new FormData();
     formData.append('document', file);
 
+    // SSE streaming: server sends live progress events so large PDFs
+    // never time out and the bar actually reflects real work done.
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
-      const data = await res.json();
-      clearInterval(tick);
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      bar.style.width = '100%';
-      setTimeout(() => {
-        document.getElementById('uploadStatus').classList.remove('visible');
-        document.getElementById('docName').textContent = file.name;
-        document.getElementById('docMeta').textContent = `${data.chunks} chunks indexed`;
-        document.getElementById('docCard').classList.add('visible');
-        enableChat();
-        showToast(`✓ Indexed ${data.chunks} chunks`, 'success');
-        addAIMessage(`Ready! I've indexed **${file.name}** into ${data.chunks} chunks.\n\nI'll automatically fix typos in your questions, decompose complex queries, and verify answers. Ask anything!`, null);
-      }, 500);
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Upload failed' }));
+        throw new Error(err.error || 'Upload failed');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          let payload;
+          try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+          if (payload.pct !== undefined) bar.style.width = payload.pct + '%';
+          if (payload.message) document.getElementById('progressLabel').textContent = payload.message;
+
+          if (payload.stage === 'indexing' && payload.total) {
+            document.getElementById('progressLabel').textContent =
+              'Indexing… ' + payload.indexed + ' / ' + payload.total + ' chunks';
+          }
+
+          if (payload.error) throw new Error(payload.error);
+
+          if (payload.success) {
+            bar.style.width = '100%';
+            setTimeout(() => {
+              document.getElementById('uploadStatus').classList.remove('visible');
+              document.getElementById('docName').textContent = file.name;
+              document.getElementById('docMeta').textContent = payload.chunks + ' chunks indexed';
+              document.getElementById('docCard').classList.add('visible');
+              enableChat();
+              showToast('✓ Indexed ' + payload.chunks + ' chunks', 'success');
+              addAIMessage('Ready! I\'ve indexed **' + file.name + '** into ' + payload.chunks + ' chunks.\n\nI\'ll automatically fix typos, decompose complex queries, and verify answers. Ask anything!', null);
+            }, 400);
+          }
+        }
+      }
     } catch (err) {
-      clearInterval(tick);
       document.getElementById('uploadStatus').classList.remove('visible');
       dropZone.style.display = '';
+      bar.style.width = '0%';
       showToast(err.message, 'error');
     }
   }

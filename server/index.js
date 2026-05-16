@@ -18,9 +18,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const upload = multer({ dest: "uploads/" });
+// Allow up to 200 MB uploads (env-overridable for your deploy)
+const MAX_FILE_MB = parseInt(process.env.MAX_FILE_MB || "200", 10);
+const upload = multer({
+  dest: "uploads/",
+  limits: { fileSize: MAX_FILE_MB * 1024 * 1024 },
+});
+
 const PORT = process.env.PORT || 3000;
 const COLLECTION_NAME = "SEC-B";
+
+// How many Qdrant points to upsert per batch.
+// Larger = faster total throughput but more memory per call.
+// 200 is safe up to ~50k chunks on a 512 MB instance.
+const UPSERT_BATCH_SIZE = 200;
 
 // ─────────────────────────────────────────────
 const qdrantClient = new QdrantClient({
@@ -84,22 +95,28 @@ function tokenize(text) {
     .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 }
 
-function buildVocab(chunks) {
+// Async vocab build — yields to the event loop every 500 chunks so
+// large PDFs (thousands of chunks) don't freeze the Node process.
+async function buildVocab(chunks) {
   const freq = {};
   Object.keys(idfCache).forEach((k) => delete idfCache[k]);
-  chunks.forEach(({ text }) => {
-    const tokens = tokenize(text);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const tokens = tokenize(chunks[i].text);
     tokens.forEach((t) => (freq[t] = (freq[t] || 0) + 1));
     const unique = new Set(tokens);
     unique.forEach((t) => (idfCache[t] = (idfCache[t] || 0) + 1));
-  });
+    // Yield every 500 chunks so large docs don't block the event loop
+    if (i % 500 === 0 && i > 0) await new Promise((r) => setImmediate(r));
+  }
+
   totalDocs = chunks.length;
   globalVocab = Object.entries(freq)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 2000)
     .map(([w]) => w);
   currentVectorSize = globalVocab.length;
-  console.log(`Vocab built: ${currentVectorSize} unique words`);
+  console.log(`Vocab built: ${currentVectorSize} unique words from ${chunks.length} chunks`);
 }
 
 function computeTFIDF(tokens, vocab) {
@@ -307,61 +324,130 @@ Output ONLY a JSON object: {"score": 0-10, "grounded": true/false, "reason": "on
 app.use(express.static(path.join(__dirname, "client")));
 
 // ─────────────────────────────────────────────
-// Upload API
+// Upload API — SSE streaming so the browser gets live progress
+// even for 300-page PDFs that take 30+ seconds to index.
+//
+// Why SSE instead of a normal JSON response?
+// Large files take too long for a single HTTP response — browsers
+// and proxies (Render, Vercel, nginx) will time out or buffer the
+// whole response. SSE keeps the connection alive and streams
+// progress events line-by-line as they happen.
 // ─────────────────────────────────────────────
 
 app.post("/api/upload", upload.single("document"), async (req, res) => {
+  // ── Set up SSE ──────────────────────────────────────────────────────────
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders(); // Send headers immediately so the browser opens the stream
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const cleanup = (filePath) => { try { fs.unlinkSync(filePath); } catch (_) {} };
+
   try {
+    if (!req.file) { send("error", { error: "No file received" }); return res.end(); }
+
     const filePath = req.file.path;
     const ext = path.extname(req.file.originalname).toLowerCase();
+    const fileSizeMB = (req.file.size / 1024 / 1024).toFixed(1);
+
+    send("progress", { stage: "reading", message: `Reading ${fileSizeMB} MB file…`, pct: 5 });
 
     let rawText = "";
 
     if (ext === ".pdf") {
-      const loader = new PDFLoader(filePath);
+      // splitPages:false → single doc (faster for large PDFs, avoids per-page overhead)
+      const loader = new PDFLoader(filePath, { splitPages: false });
       const docs = await loader.load();
       rawText = docs.map((d) => d.pageContent).join("\n\n");
     } else if (ext === ".txt") {
       rawText = fs.readFileSync(filePath, "utf-8");
     } else {
-      return res.status(400).json({ error: "Unsupported file type" });
+      send("error", { error: "Unsupported file type. Use PDF or TXT." });
+      cleanup(filePath);
+      return res.end();
     }
 
     if (!rawText.trim()) {
-      return res.status(400).json({ error: "Document appears empty or unreadable" });
+      send("error", { error: "Document appears empty or unreadable (possibly a scanned image PDF)" });
+      cleanup(filePath);
+      return res.end();
     }
 
+    send("progress", { stage: "chunking", message: "Chunking text…", pct: 15 });
     documentTitle = req.file.originalname;
 
+    // Chunk size 1200, overlap 200:
+    // Smaller chunks → sharper retrieval precision, less cross-sentence context.
+    // Larger chunks → richer context, noisier embeddings.
+    // 1200/200 is a proven balance for most docs.
     const chunks = chunkText(rawText);
-    // Chunk size 1200, overlap 200 — tradeoff explained:
-    // Smaller chunks = higher precision retrieval but lose cross-sentence context.
-    // Larger chunks = more context but noisier embeddings.
-    // 1200/200 is a good balance for most documents.
+    send("progress", { stage: "vocab", message: `Building vocab from ${chunks.length} chunks…`, pct: 25 });
 
-    buildVocab(chunks);
+    // Async vocab — won't block event loop even for 5000+ chunks
+    await buildVocab(chunks);
+    send("progress", { stage: "collection", message: "Creating Qdrant collection…", pct: 35 });
 
-    try { await qdrantClient.deleteCollection(COLLECTION_NAME); } catch (e) {}
-
+    try { await qdrantClient.deleteCollection(COLLECTION_NAME); } catch (_) {}
     await qdrantClient.createCollection(COLLECTION_NAME, {
       vectors: { size: currentVectorSize, distance: "Cosine" },
     });
 
-    const points = chunks.map((chunk, i) => ({
-      id: i,
-      vector: tfidfEmbedding(chunk.text),
-      payload: { text: chunk.text, chunkIndex: chunk.chunkIndex },
-    }));
+    // ── Batched upsert ────────────────────────────────────────────────────
+    // Problem: upsert(10,000 points) in one call →
+    //   • Qdrant may time out or OOM on the server side
+    //   • The entire embedding array sits in memory at once
+    // Solution: send UPSERT_BATCH_SIZE points at a time, report progress.
+    // ─────────────────────────────────────────────────────────────────────
 
-    await qdrantClient.upsert(COLLECTION_NAME, { wait: true, points });
+    const totalChunks = chunks.length;
+    let indexed = 0;
 
-    try { fs.unlinkSync(filePath); } catch (e) {}
+    for (let start = 0; start < totalChunks; start += UPSERT_BATCH_SIZE) {
+      const batch = chunks.slice(start, start + UPSERT_BATCH_SIZE);
 
-    console.log(`Indexed "${documentTitle}" → ${points.length} chunks`);
-    res.json({ success: true, chunks: points.length });
+      const points = batch.map((chunk, j) => ({
+        id: start + j,
+        vector: tfidfEmbedding(chunk.text),
+        payload: { text: chunk.text, chunkIndex: chunk.chunkIndex },
+      }));
+
+      await qdrantClient.upsert(COLLECTION_NAME, { wait: true, points });
+      indexed += points.length;
+
+      // Progress: 35–95% range reserved for upsert phase
+      const pct = Math.round(35 + (indexed / totalChunks) * 60);
+      send("progress", {
+        stage: "indexing",
+        message: `Indexing chunks… ${indexed}/${totalChunks}`,
+        pct,
+        indexed,
+        total: totalChunks,
+      });
+
+      // Yield between batches so other requests aren't starved
+      await new Promise((r) => setImmediate(r));
+    }
+
+    cleanup(filePath);
+    console.log(`Indexed "${documentTitle}" → ${totalChunks} chunks in batches of ${UPSERT_BATCH_SIZE}`);
+
+    // Final done event — frontend listens for this to switch to chat mode
+    send("done", { success: true, chunks: totalChunks });
+    res.end();
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("[Upload error]", err);
+    // Multer file-too-large error
+    if (err.code === "LIMIT_FILE_SIZE") {
+      send("error", { error: `File too large. Maximum allowed size is ${MAX_FILE_MB} MB.` });
+    } else {
+      send("error", { error: err.message });
+    }
+    res.end();
   }
 });
 
