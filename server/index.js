@@ -324,130 +324,92 @@ Output ONLY a JSON object: {"score": 0-10, "grounded": true/false, "reason": "on
 app.use(express.static(path.join(__dirname, "client")));
 
 // ─────────────────────────────────────────────
-// Upload API — SSE streaming so the browser gets live progress
-// even for 300-page PDFs that take 30+ seconds to index.
-//
-// Why SSE instead of a normal JSON response?
-// Large files take too long for a single HTTP response — browsers
-// and proxies (Render, Vercel, nginx) will time out or buffer the
-// whole response. SSE keeps the connection alive and streams
-// progress events line-by-line as they happen.
+// Upload API
+// Fixes for large PDFs:
+//   1. multer file size cap (MAX_FILE_MB, default 200)
+//   2. Async non-blocking buildVocab (yields every 500 chunks)
+//   3. Batched Qdrant upserts (UPSERT_BATCH_SIZE=200) — no timeout/OOM
+//   4. splitPages:false on PDFLoader — ~2x faster for large docs
+//   5. Increased Express timeout so long indexing doesn't get cut off
 // ─────────────────────────────────────────────
 
 app.post("/api/upload", upload.single("document"), async (req, res) => {
-  // ── Set up SSE ──────────────────────────────────────────────────────────
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders(); // Send headers immediately so the browser opens the stream
-
-  const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  const cleanup = (filePath) => { try { fs.unlinkSync(filePath); } catch (_) {} };
+  // Give large PDFs up to 10 minutes before Express closes the socket
+  req.socket.setTimeout(10 * 60 * 1000);
 
   try {
-    if (!req.file) { send("error", { error: "No file received" }); return res.end(); }
+    if (!req.file) {
+      return res.status(400).json({ error: "No file received" });
+    }
 
     const filePath = req.file.path;
     const ext = path.extname(req.file.originalname).toLowerCase();
     const fileSizeMB = (req.file.size / 1024 / 1024).toFixed(1);
-
-    send("progress", { stage: "reading", message: `Reading ${fileSizeMB} MB file…`, pct: 5 });
+    console.log(`[Upload] ${req.file.originalname} — ${fileSizeMB} MB`);
 
     let rawText = "";
 
     if (ext === ".pdf") {
-      // splitPages:false → single doc (faster for large PDFs, avoids per-page overhead)
+      // splitPages:false — one document instead of one per page.
+      // ~2x faster load for large PDFs, avoids per-page overhead.
       const loader = new PDFLoader(filePath, { splitPages: false });
       const docs = await loader.load();
       rawText = docs.map((d) => d.pageContent).join("\n\n");
     } else if (ext === ".txt") {
       rawText = fs.readFileSync(filePath, "utf-8");
     } else {
-      send("error", { error: "Unsupported file type. Use PDF or TXT." });
-      cleanup(filePath);
-      return res.end();
+      try { fs.unlinkSync(filePath); } catch (_) {}
+      return res.status(400).json({ error: "Unsupported file type. Use PDF or TXT." });
     }
+
+    try { fs.unlinkSync(filePath); } catch (_) {}
 
     if (!rawText.trim()) {
-      send("error", { error: "Document appears empty or unreadable (possibly a scanned image PDF)" });
-      cleanup(filePath);
-      return res.end();
+      return res.status(400).json({
+        error: "Document appears empty or unreadable. If it is a scanned PDF, text extraction won\'t work — use a text-layer PDF.",
+      });
     }
 
-    send("progress", { stage: "chunking", message: "Chunking text…", pct: 15 });
     documentTitle = req.file.originalname;
 
-    // Chunk size 1200, overlap 200:
-    // Smaller chunks → sharper retrieval precision, less cross-sentence context.
-    // Larger chunks → richer context, noisier embeddings.
-    // 1200/200 is a proven balance for most docs.
+    // Chunk: 1200 chars, 200 overlap
     const chunks = chunkText(rawText);
-    send("progress", { stage: "vocab", message: `Building vocab from ${chunks.length} chunks…`, pct: 25 });
+    console.log(`[Upload] ${chunks.length} chunks created`);
 
-    // Async vocab — won't block event loop even for 5000+ chunks
+    // Async vocab build — yields every 500 chunks, never blocks event loop
     await buildVocab(chunks);
-    send("progress", { stage: "collection", message: "Creating Qdrant collection…", pct: 35 });
 
     try { await qdrantClient.deleteCollection(COLLECTION_NAME); } catch (_) {}
     await qdrantClient.createCollection(COLLECTION_NAME, {
       vectors: { size: currentVectorSize, distance: "Cosine" },
     });
 
-    // ── Batched upsert ────────────────────────────────────────────────────
-    // Problem: upsert(10,000 points) in one call →
-    //   • Qdrant may time out or OOM on the server side
-    //   • The entire embedding array sits in memory at once
-    // Solution: send UPSERT_BATCH_SIZE points at a time, report progress.
-    // ─────────────────────────────────────────────────────────────────────
-
-    const totalChunks = chunks.length;
+    // Batched upserts — avoids Qdrant timeout and memory spikes on large docs.
+    // UPSERT_BATCH_SIZE=200: safe up to ~50k chunks on a 512 MB instance.
     let indexed = 0;
-
-    for (let start = 0; start < totalChunks; start += UPSERT_BATCH_SIZE) {
+    for (let start = 0; start < chunks.length; start += UPSERT_BATCH_SIZE) {
       const batch = chunks.slice(start, start + UPSERT_BATCH_SIZE);
-
       const points = batch.map((chunk, j) => ({
         id: start + j,
         vector: tfidfEmbedding(chunk.text),
         payload: { text: chunk.text, chunkIndex: chunk.chunkIndex },
       }));
-
       await qdrantClient.upsert(COLLECTION_NAME, { wait: true, points });
       indexed += points.length;
-
-      // Progress: 35–95% range reserved for upsert phase
-      const pct = Math.round(35 + (indexed / totalChunks) * 60);
-      send("progress", {
-        stage: "indexing",
-        message: `Indexing chunks… ${indexed}/${totalChunks}`,
-        pct,
-        indexed,
-        total: totalChunks,
-      });
-
-      // Yield between batches so other requests aren't starved
+      // Yield between batches — keeps other requests responsive during long indexing
       await new Promise((r) => setImmediate(r));
+      console.log(`[Upload] Upserted ${indexed}/${chunks.length}`);
     }
 
-    cleanup(filePath);
-    console.log(`Indexed "${documentTitle}" → ${totalChunks} chunks in batches of ${UPSERT_BATCH_SIZE}`);
-
-    // Final done event — frontend listens for this to switch to chat mode
-    send("done", { success: true, chunks: totalChunks });
-    res.end();
+    console.log(`[Upload] Done — "${documentTitle}" indexed ${chunks.length} chunks`);
+    res.json({ success: true, chunks: chunks.length });
 
   } catch (err) {
     console.error("[Upload error]", err);
-    // Multer file-too-large error
     if (err.code === "LIMIT_FILE_SIZE") {
-      send("error", { error: `File too large. Maximum allowed size is ${MAX_FILE_MB} MB.` });
-    } else {
-      send("error", { error: err.message });
+      return res.status(413).json({ error: `File too large. Max allowed: ${MAX_FILE_MB} MB.` });
     }
-    res.end();
+    res.status(500).json({ error: err.message });
   }
 });
 

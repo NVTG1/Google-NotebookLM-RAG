@@ -365,66 +365,56 @@
 
     dropZone.style.display = 'none';
     document.getElementById('uploadStatus').classList.add('visible');
-    document.getElementById('progressLabel').textContent = 'Uploading…';
+    document.getElementById('progressLabel').textContent = 'Uploading file...';
 
+    // Fake progress bar — moves to 80% while server processes, jumps to 100% on done.
+    // Real work (batched upserts + async vocab) happens server-side.
+    let pct = 5;
     const bar = document.getElementById('progressBar');
     bar.style.width = '5%';
+
+    const stages = [
+      { pct: 15, label: 'Reading document...', delay: 800 },
+      { pct: 30, label: 'Chunking text...', delay: 2500 },
+      { pct: 45, label: 'Building vocabulary...', delay: 4000 },
+      { pct: 60, label: 'Creating vector index...', delay: 6000 },
+      { pct: 75, label: 'Indexing chunks...', delay: 9000 },
+      { pct: 82, label: 'Almost done...', delay: 14000 },
+    ];
+    const timers = stages.map(s => setTimeout(() => {
+      bar.style.width = s.pct + '%';
+      document.getElementById('progressLabel').textContent = s.label;
+    }, s.delay));
 
     const formData = new FormData();
     formData.append('document', file);
 
-    // SSE streaming: server sends live progress events so large PDFs
-    // never time out and the bar actually reflects real work done.
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      timers.forEach(clearTimeout);
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Upload failed' }));
-        throw new Error(err.error || 'Upload failed');
-      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      bar.style.width = '100%';
+      document.getElementById('progressLabel').textContent = 'Done!';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      setTimeout(() => {
+        document.getElementById('uploadStatus').classList.remove('visible');
+        document.getElementById('docName').textContent = file.name;
+        document.getElementById('docMeta').textContent = data.chunks + ' chunks indexed';
+        document.getElementById('docCard').classList.add('visible');
+        enableChat();
+        showToast('Indexed ' + data.chunks + ' chunks', 'success');
+        addAIMessage(
+          'Ready! I have indexed **' + file.name + '** into ' + data.chunks + ' chunks.\n\n' +
+          'I will automatically fix typos, decompose complex queries, and verify answers. Ask anything!',
+          null
+        );
+      }, 400);
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue;
-          let payload;
-          try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
-
-          if (payload.pct !== undefined) bar.style.width = payload.pct + '%';
-          if (payload.message) document.getElementById('progressLabel').textContent = payload.message;
-
-          if (payload.stage === 'indexing' && payload.total) {
-            document.getElementById('progressLabel').textContent =
-              'Indexing… ' + payload.indexed + ' / ' + payload.total + ' chunks';
-          }
-
-          if (payload.error) throw new Error(payload.error);
-
-          if (payload.success) {
-            bar.style.width = '100%';
-            setTimeout(() => {
-              document.getElementById('uploadStatus').classList.remove('visible');
-              document.getElementById('docName').textContent = file.name;
-              document.getElementById('docMeta').textContent = payload.chunks + ' chunks indexed';
-              document.getElementById('docCard').classList.add('visible');
-              enableChat();
-              showToast('✓ Indexed ' + payload.chunks + ' chunks', 'success');
-              addAIMessage('Ready! I\'ve indexed **' + file.name + '** into ' + payload.chunks + ' chunks.\n\nI\'ll automatically fix typos, decompose complex queries, and verify answers. Ask anything!', null);
-            }, 400);
-          }
-        }
-      }
     } catch (err) {
+      timers.forEach(clearTimeout);
       document.getElementById('uploadStatus').classList.remove('visible');
       dropZone.style.display = '';
       bar.style.width = '0%';
